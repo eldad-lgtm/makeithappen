@@ -14,7 +14,12 @@ export async function requestOtp(_prev: AuthFormState, formData: FormData): Prom
   const parsed = normalizePhone(raw, country);
   if (!parsed) return { error: "That doesn't look like a valid phone number." };
 
-  const supabase = await createSupabaseServerClient();
+  let supabase;
+  try {
+    supabase = await createSupabaseServerClient();
+  } catch {
+    return { error: "Sign-in isn't configured on this deployment yet (missing Supabase settings)." };
+  }
   const { error } = await supabase.auth.signInWithOtp({ phone: parsed.e164 });
   if (error) return { error: error.message };
 

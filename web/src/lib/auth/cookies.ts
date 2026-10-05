@@ -9,10 +9,15 @@ import type { Database } from "@/db/database.types";
 export async function refreshSession(request: NextRequest): Promise<{ response: NextResponse; userId: string | null }> {
   let response = NextResponse.next({ request });
 
-  const supabase = createServerClient<Database>(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !anonKey) {
+    // Unconfigured deployment: treat every request as anonymous instead of
+    // 500ing on every route. Pages surface the missing config themselves.
+    return { response, userId: null };
+  }
+
+  const supabase = createServerClient<Database>(url, anonKey, {
       cookies: {
         getAll() {
           return request.cookies.getAll();
@@ -24,8 +29,7 @@ export async function refreshSession(request: NextRequest): Promise<{ response: 
           Object.entries(headers ?? {}).forEach(([k, v]) => response.headers.set(k, v));
         },
       },
-    },
-  );
+  });
 
   const { data } = await supabase.auth.getClaims();
   return { response, userId: (data?.claims?.sub as string | undefined) ?? null };
