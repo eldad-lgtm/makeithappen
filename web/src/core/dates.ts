@@ -2,9 +2,11 @@
  * Date option generation, scoring, and explanation. PLAN.md §6.1 – §6.6.
  */
 
-import type { DateOption, Member, Pref } from "./types";
+import type { BlackoutRange, DateOption, Member, Pref } from "./types";
 
+/** WhatsApp list pickers allow 10 rows; quick-reply buttons allow 3 (§7.2). */
 export const MAX_DATE_OPTIONS = 10;
+export const MAX_BUTTON_OPTIONS = 3;
 
 /* ------------------------------ date helpers ------------------------------ */
 
@@ -124,6 +126,51 @@ export function inTripWindow(
   windowEnd: string,
 ): boolean {
   return start >= windowStart && end <= windowEnd;
+}
+
+export function rangesOverlap(aStart: string, aEnd: string, bStart: string, bEnd: string): boolean {
+  return !(aEnd < bStart || aStart > bEnd);
+}
+
+/* -------------------------------- blackouts ------------------------------- */
+
+/**
+ * Web users paint a calendar; WhatsApp users tap options. Blackout dates
+ * automatically derive a `no` vote for any overlapping option so both inputs
+ * feed one scoring function (§5.2). Returns only the derived votes; explicit
+ * votes always win over derived ones.
+ */
+export function deriveVotesFromBlackouts(
+  options: DateOption[],
+  blackouts: BlackoutRange[],
+): { optionId: string; userId: string; preference: Pref }[] {
+  const out: { optionId: string; userId: string; preference: Pref }[] = [];
+  for (const o of options) {
+    const blockedUsers = new Set<string>();
+    for (const b of blackouts) {
+      if (rangesOverlap(o.start, o.end, b.start, b.end)) blockedUsers.add(b.userId);
+    }
+    for (const userId of blockedUsers) out.push({ optionId: o.id, userId, preference: "no" });
+  }
+  return out;
+}
+
+/** Apply derived votes without overriding explicit ones. */
+export function mergeVotes(
+  members: Member[],
+  derived: { optionId: string; userId: string; preference: Pref }[],
+): Member[] {
+  const byUser = new Map<string, Record<string, Pref>>();
+  for (const d of derived) {
+    const m = byUser.get(d.userId) ?? {};
+    m[d.optionId] = d.preference;
+    byUser.set(d.userId, m);
+  }
+  return members.map((m) => {
+    const extra = byUser.get(m.id);
+    if (!extra) return m;
+    return { ...m, votes: { ...extra, ...m.votes } };
+  });
 }
 
 /* --------------------------------- scoring -------------------------------- */

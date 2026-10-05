@@ -4,14 +4,18 @@
  * A pure decision function. It returns either an action to take or an explicit
  * reason for staying silent — the reasons matter as much as the sends, because
  * "why didn't it nudge?" is the question you actually debug.
+ *
+ * This module decides WHEN and WHERE. The copy lives in `messages/` keyed by
+ * template, because outside a 24h WhatsApp session every message must be a
+ * pre-approved template (§7.2) — not a string generated here.
  */
 
-import type { EscalationMode, Member, NudgeRecord, Phase, PushLevel } from "./types";
+import type { EscalationMode, Member, NudgeRecord, NudgeTarget, Phase, PushLevel } from "./types";
 
 export interface LadderStep {
   level: number;
   afterHours: number;
-  target: "dm" | "group" | "admin";
+  target: NudgeTarget;
   tone: string;
 }
 
@@ -48,136 +52,31 @@ export function ladderFor(level: PushLevel): LadderStep[] {
   return STANDARD_LADDER;
 }
 
-export const PUSH_LEVELS: {
-  id: PushLevel;
-  label: string;
-  hint: string;
-}[] = [
+export const PUSH_LEVELS: { id: PushLevel; label: string; hint: string }[] = [
   { id: "gentle", label: "Gentle", hint: "Slower, private, no roasting" },
   { id: "standard", label: "Standard", hint: "The plan: 24h steps, group callouts" },
   { id: "spicy", label: "Spicy", hint: "Faster ladder, sharper copy" },
 ];
 
+export const QUIET_HOURS = { start: 22, end: 8 } as const;
+
+export function inQuietHours(localHour: number): boolean {
+  return localHour >= QUIET_HOURS.start || localHour < QUIET_HOURS.end;
+}
+
 export interface NudgeAction {
   memberId: string;
   level: number;
-  target: "dm" | "group" | "admin";
-  body: string;
+  target: NudgeTarget;
+  /** The target the ladder wanted before mode/push adjustments; used to pick copy. */
+  ladderTarget: NudgeTarget;
+  /** `true` when a public level was converted to a firmer DM (`none` mode / gentle). */
+  publicSuppressed: boolean;
 }
 
-export type NudgeDecision =
-  | { send: NudgeAction }
-  | { skip: string };
+export type NudgeDecision = { send: NudgeAction } | { skip: string; retryInMs?: number };
 
 const HOUR = 3600_000;
-
-interface Vars {
-  name: string;
-  waiting: number;
-  answered: string;
-  answeredCount: number;
-  ghosts: string;
-  total: number;
-  days: number;
-}
-
-type CopyPool = Record<number, ((v: Vars) => string)[]>;
-
-const STANDARD_DM: CopyPool = {
-  1: [
-    () => `Gentle reminder: Athens needs your dates.\n\nTakes four seconds. Literally four.`,
-    () => `Quick one — your Athens dates are the only thing missing.\n\nFour seconds. Less than this message took to read.`,
-  ],
-  2: [
-    (v) =>
-      `${v.name}, ${v.waiting} people are waiting on you.\n\nThat's ${v.waiting} people. Thinking about you. Not in a good way.`,
-    (v) =>
-      `Still nothing, ${v.name}. ${v.waiting} people have answered.\n\nWe both know you've seen this.`,
-  ],
-};
-
-const STANDARD_GROUP: CopyPool = {
-  3: [
-    (v) =>
-      `ATHENS STANDINGS\n\nAnswered: ${v.answered}\nStill deciding: ${v.ghosts}\n\nWe're not angry. Just visibly disappointed.`,
-    (v) =>
-      `ATHENS PROGRESS REPORT\n\n${v.answeredCount} of ${v.total} have picked dates.\nOutstanding: ${v.ghosts}\n\nNo pressure. Obviously this is pressure.`,
-  ],
-  4: [
-    (v) =>
-      `SLOWEST HUMAN ALIVE AWARD\n\n${v.ghosts} — ${v.days} days.\n\nPrevious record holder: also ${v.ghosts}, Barcelona 2024.`,
-    (v) =>
-      `Day ${v.days} of waiting for ${v.ghosts}.\n\nThe ruins of Athens have been standing for 2,500 years. They can wait. We cannot.`,
-  ],
-};
-
-const GENTLE_DM: CopyPool = {
-  1: [
-    () => `No rush — when you have a minute, Athens still needs your dates.`,
-    () => `Friendly nudge: your dates for Athens whenever you're ready.`,
-  ],
-  2: [
-    (v) =>
-      `Hey ${v.name} — still hoping for your dates when you can.\n\n${v.waiting} people have answered. No pressure from the group.`,
-    (v) => `Still waiting on your Athens dates, ${v.name}. Whenever works.`,
-  ],
-  3: [
-    (v) =>
-      `${v.name}, a quiet update: ${v.answeredCount} of ${v.total} have dates in.\n\nStill need yours. No callout, just us.`,
-  ],
-  4: [
-    (v) =>
-      `Last private ask, ${v.name}. ${v.days} days in. The admin can lock without you if that's easier.`,
-  ],
-};
-
-const SPICY_DM: CopyPool = {
-  1: [
-    () => `Athens. Your dates. Now would be great.\n\nFour seconds. The group is watching the clock.`,
-    () => `This is the polite version. Athens needs your dates.`,
-  ],
-  2: [
-    (v) =>
-      `${v.name}. ${v.waiting} people have answered. You have not.\n\nThe next one goes to the group.`,
-    (v) => `Still nothing, ${v.name}. We both know you've seen this. The group version is worse.`,
-  ],
-};
-
-const SPICY_GROUP: CopyPool = {
-  3: [
-    (v) =>
-      `ATHENS STANDINGS — and they are not flattering.\n\nIn: ${v.answered}\nGhosting: ${v.ghosts}\n\nName and shame, affectionately.`,
-    (v) =>
-      `${v.answeredCount} of ${v.total} have dates.\n\nOutstanding: ${v.ghosts}\n\nThis is now a spectator sport.`,
-  ],
-  4: [
-    (v) =>
-      `SLOWEST HUMAN ALIVE AWARD (SPICY EDITION)\n\n${v.ghosts} — ${v.days} days.\n\nThe ruins waited 2,500 years. We will not.`,
-    (v) =>
-      `Day ${v.days}. ${v.ghosts} still has not picked dates.\n\nPrevious record: also ${v.ghosts}. This is a pattern.`,
-  ],
-};
-
-function poolFor(push: PushLevel, target: string): CopyPool {
-  if (push === "gentle") return GENTLE_DM;
-  if (push === "spicy") return target === "group" ? SPICY_GROUP : SPICY_DM;
-  return target === "group" ? STANDARD_GROUP : STANDARD_DM;
-}
-
-export function renderNudge(
-  level: number,
-  target: string,
-  v: Vars,
-  salt: number,
-  push: PushLevel = "standard",
-): string {
-  const pool = poolFor(push, target);
-  const variants = pool[level];
-  if (!variants || variants.length === 0) {
-    return `Still waiting on ${v.ghosts}. Lock the dates without them, or give them another day?`;
-  }
-  return variants[salt % variants.length](v);
-}
 
 export interface PolicyInput {
   member: Member;
@@ -186,13 +85,15 @@ export interface PolicyInput {
   pushLevel: PushLevel;
   askedAt: number;
   now: number;
-  /** This member's nudge history for this phase. */
+  /** This member's nudge history for this trip + phase. */
   history: NudgeRecord[];
   /** All nudges to this member across every trip — for §6.8 global caps. */
   globalHistory: NudgeRecord[];
   hasResponded: boolean;
   /** Local hour 0–23 in the member's timezone. */
   localHour: number;
+  /** Group callouts for this trip in the last 48h (any member). Max one per trip per 48h. */
+  tripGroupCallouts48h: number;
 }
 
 export function decide(input: PolicyInput): NudgeDecision {
@@ -201,39 +102,79 @@ export function decide(input: PolicyInput): NudgeDecision {
 
   if (hasResponded) return { skip: `${first(member)} already answered` };
   if (member.optedOut) return { skip: `${first(member)} opted out of messaging` };
+  if (member.status === "removed" || member.status === "declined") {
+    return { skip: `${first(member)} is no longer in the trip` };
+  }
 
   const hours = (now - askedAt) / HOUR;
   const ladder = ladderFor(pushLevel);
   const due = [...ladder].reverse().find((s) => hours >= s.afterHours);
-  if (!due) return { skip: `too early — ${Math.floor(hours)}h since the ask (${pushLevel})` };
+  if (!due) {
+    const next = ladder[0];
+    return {
+      skip: `too early — ${Math.floor(hours)}h since the ask (${pushLevel})`,
+      retryInMs: Math.max(0, next.afterHours * HOUR - (now - askedAt)),
+    };
+  }
 
   const alreadySent = history.some((n) => n.level === due.level && n.phase === phase);
   if (alreadySent) return { skip: `level ${due.level} already sent to ${first(member)}` };
 
-  // Gentle never goes public. `none` also keeps public levels as DMs (§6.7).
-  const target: "dm" | "group" | "admin" =
-    due.target === "group" && (mode === "none" || pushLevel === "gentle") ? "dm" : due.target;
+  // Public levels become firmer DMs when the admin turned callouts off (`none`)
+  // or chose the gentle dial. The ladder never silently loses its teeth (§6.7).
+  const suppressPublic = due.target === "group" && (mode === "none" || pushLevel === "gentle");
+  const target: NudgeTarget = suppressPublic ? "dm" : due.target;
 
-  if (target === "dm" && (input.localHour >= 22 || input.localHour < 8)) {
-    return { skip: `quiet hours for ${first(member)} (${input.localHour}:00 local)` };
+  if (target === "dm" && inQuietHours(input.localHour)) {
+    const untilMorning = ((QUIET_HOURS.end - input.localHour + 24) % 24) * HOUR;
+    return {
+      skip: `quiet hours for ${first(member)} (${input.localHour}:00 local)`,
+      retryInMs: untilMorning || HOUR,
+    };
   }
 
   if (target === "dm") {
     const recentDm = globalHistory.filter((n) => n.target === "dm" && now - n.at < 20 * HOUR);
     if (recentDm.length > 0) {
-      return { skip: `global cap — ${first(member)} was DM'd under 20h ago` };
+      const oldest = Math.min(...recentDm.map((n) => n.at));
+      return {
+        skip: `global cap — ${first(member)} was DM'd under 20h ago`,
+        retryInMs: 20 * HOUR - (now - oldest) + 60_000,
+      };
     }
   }
+
   if (target === "group") {
     const recentGroup = globalHistory.filter((n) => n.target === "group" && now - n.at < 48 * HOUR);
     if (recentGroup.length > 0) {
-      return { skip: `global cap — ${first(member)} was named publicly under 48h ago` };
+      const oldest = Math.min(...recentGroup.map((n) => n.at));
+      return {
+        skip: `global cap — ${first(member)} was named publicly under 48h ago`,
+        retryInMs: 48 * HOUR - (now - oldest) + 60_000,
+      };
+    }
+    if (input.tripGroupCallouts48h > 0) {
+      return { skip: `trip cap — one group callout per 48h`, retryInMs: 12 * HOUR };
     }
   }
 
   return {
-    send: { memberId: member.id, level: due.level, target, body: "" },
+    send: {
+      memberId: member.id,
+      level: due.level,
+      target,
+      ladderTarget: due.target,
+      publicSuppressed: suppressPublic,
+    },
   };
+}
+
+/** When should the runner next look at this member? The next ladder step. */
+export function nextStepAt(pushLevel: PushLevel, askedAt: number, sentLevels: number[]): number | null {
+  const ladder = ladderFor(pushLevel);
+  const next = ladder.find((s) => !sentLevels.includes(s.level));
+  if (!next) return null;
+  return askedAt + next.afterHours * HOUR;
 }
 
 function first(m: Member): string {

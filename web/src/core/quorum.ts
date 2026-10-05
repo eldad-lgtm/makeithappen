@@ -9,14 +9,20 @@ export interface Tally {
   invited: number;
 }
 
+/** Only people still in the trip count; removed members are not invitees. */
+export function invitees(members: Member[]): Member[] {
+  return members.filter((m) => m.status !== "removed");
+}
+
 export function tally(members: Member[]): Tally {
   let yes = 0;
   let no = 0;
-  for (const m of members) {
+  const inv = invitees(members);
+  for (const m of inv) {
     if (m.approval === "yes") yes++;
     else if (m.approval === "no") no++;
   }
-  return { yes, no, pending: members.length - yes - no, invited: members.length };
+  return { yes, no, pending: inv.length - yes - no, invited: inv.length };
 }
 
 export type QuorumState = "reached" | "unreachable" | "open";
@@ -37,5 +43,22 @@ export function quorumState(members: Member[], quorum: number): QuorumState {
 
 /** Members still in the trip for later phases. Rejecters are dropped (§4.1). */
 export function activeMembers(members: Member[]): Member[] {
-  return members.filter((m) => m.approval === "yes");
+  return members.filter((m) => m.approval === "yes" && m.status !== "removed");
+}
+
+/** Members who have not yet answered the current phase's question. */
+export function pendingFor(members: Member[], phase: "approval" | "dates", optionIds: string[]): Member[] {
+  if (phase === "approval") {
+    return invitees(members).filter((m) => m.approval === null);
+  }
+  return activeMembers(members).filter((m) => !hasVotedAll(m, optionIds));
+}
+
+export function hasVotedAll(m: Member, optionIds: string[]): boolean {
+  if (optionIds.length === 0) return false;
+  return optionIds.every((id) => m.votes[id] !== undefined);
+}
+
+export function hasVotedAny(m: Member, optionIds: string[]): boolean {
+  return optionIds.some((id) => m.votes[id] !== undefined);
 }
