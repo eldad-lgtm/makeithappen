@@ -1,0 +1,57 @@
+# Supabase CLI config for local development (`supabase start`).
+# Phone OTP is the only sign-in method (PLAN.md §5.1, §7.1).
+
+project_id = "makeithappen"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 17
+
+[db.migrations]
+enabled = true
+schema_paths = []
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000"]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+enable_signup = true
+enable_anonymous_sign_ins = false
+
+[auth.email]
+enable_signup = false
+
+[auth.sms]
+enable_signup = true
+enable_confirmations = true
+template = "Your MakeItHappen code is {{ .Code }}"
+max_frequency = "5s"
+
+# Locally, OTPs are fixed so you never pay for an SMS while developing.
+# Add your own number here; use the matching code on /login/verify.
+[auth.sms.test_otp]
+"972500000000" = "123456"
+"15555550100" = "123456"
+
+# Production: Twilio Verify or Twilio Messaging. Secrets via env, never committed.
+[auth.sms.twilio]
+enabled = false
+account_sid = "env(TWILIO_ACCOUNT_SID)"
+message_service_sid = "env(TWILIO_MESSAGE_SERVICE_SID)"
+auth_token = "env(TWILIO_AUTH_TOKEN)"
+
+[auth.rate_limit]
+sms_sent = 30
+token_verifications = 30
