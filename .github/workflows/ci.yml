@@ -1,1 +1,87 @@
+name: CI
 
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: web
+
+jobs:
+  verify:
+    name: typecheck · lint · test · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint (includes core/ import-boundary rule)
+        run: npm run lint
+
+      - name: Unit tests (core, messages, channels, architecture guards)
+        run: npm test
+
+      - name: Build
+        run: npm run build
+        env:
+          # Placeholders: lazy env getters mean nothing is read at build time,
+          # but Next still needs the public URL/anon key shape to be present.
+          NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+          MESSAGING_CHANNEL: console
+
+      - name: Service-role key never in a client bundle (§7.6)
+        run: |
+          if grep -rIl "SUPABASE_SERVICE_ROLE_KEY" .next/static 2>/dev/null; then
+            echo "::error::service-role key name found in a client bundle"; exit 1
+          fi
+          echo "ok: no service-role reference in .next/static"
+
+  migrations:
+    name: migrations apply cleanly
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply migrations in order against a vanilla Postgres
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Shim the Supabase-provided bits the schema expects so the SQL
+          # itself is exercised. Real deploys run `supabase db push`.
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -c "
+            CREATE SCHEMA IF NOT EXISTS auth;
+            CREATE TABLE IF NOT EXISTS auth.users (id uuid primary key, phone text);
+            CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS \$\$ SELECT NULL::uuid \$\$;
+            CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS \$\$ SELECT '{}'::jsonb \$\$;
+            CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN;
+            CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          for f in supabase/migrations/*.sql; do
+            echo "== $f"; psql -h localhost -U postgres -v ON_ERROR_STOP=1 -f "$f"
+          done
